@@ -16,3 +16,9 @@ def control_center_process_comment(request_body):
     # determine the contents of the update
     # determine if the control center needs to be updated
     # perform the update
+
+
+def control_center_process_pr_opened(event_info, pr):
+    """Process event "pull request opened"."""
+    # add initial info for control center to PR description (if not yet done)
+    #   make two functions: one for checking, one for adding

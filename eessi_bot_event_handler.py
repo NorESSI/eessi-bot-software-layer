@@ -74,6 +74,9 @@ class EESSIBotSoftwareLayer(PyGHee):
         """
         Handle opening of a pull request.
         """
+        # if bot instance responsible for control center, process event
+        if False:
+            control_center_process_pr_opened(event_info, pr)
         log("PR opened: waiting for label bot:build")
 
     def handle_pull_request_event(self, event_info, log_file=None):
