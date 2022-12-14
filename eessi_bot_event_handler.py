@@ -18,7 +18,7 @@ import waitress
 from connections import github
 from tools import config
 from tools.args import event_handler_parse
-from tools.controlcenter import control_center_process_comment
+from tools.controlcenter import control_center_process_comment, control_center_process_pr_opened
 from tasks.build import submit_build_jobs
 from tasks.deploy import deploy_built_artefacts
 
