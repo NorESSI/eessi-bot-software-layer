@@ -18,6 +18,7 @@ import waitress
 from connections import github
 from tools import config
 from tools.args import event_handler_parse
+from tools.controlcenter import control_center_process_comment
 from tasks.build import submit_build_jobs
 from tasks.deploy import deploy_built_artefacts
 
@@ -35,6 +36,9 @@ class EESSIBotSoftwareLayer(PyGHee):
         comment_author = request_body['comment']['user']['login']
         comment_txt = request_body['comment']['body']
         log("Comment posted in %s by @%s: %s" % (issue_url, comment_author, comment_txt))
+        # if bot instance responsible for control center, process event
+        if False:
+            control_center_process_comment(request_body)
         log("issue_comment event handled!", log_file=log_file)
 
     def handle_installation_event(self, event_info, log_file=None):
