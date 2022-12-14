@@ -66,3 +66,21 @@ def update_comment(cmnt_id, pr, update):
     """
     issue_comment = pr.get_issue_comment(cmnt_id)
     issue_comment.edit(issue_comment.body + update)
+
+
+def get_pr_log(comment_id, pr):
+    """Get machine readable log stored in details section."""
+    # get comment body
+    # find details (<details>DETAILS</details>)
+    # load DETAILS into json
+    # return json
+    return None
+
+
+def update_pr_log(comment_id, pr, update):
+    """Update machine readable log stored in details section."""
+    # get comment body
+    # find details (<details>DETAILS</details>)
+    # load DETAILS into json
+    # update json
+    # update PR comment
