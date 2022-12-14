@@ -120,3 +120,9 @@ poll_interval = 60
 
 # full path to the command for manipulating existing jobs
 scontrol_command = /usr/bin/scontrol
+
+[control_center]
+# designate this instance to manage the control center (collecting
+# information from other instances and updating the PR description;
+# with "PR description" we refer to the initial "comment" in a PR)
+manage_control_center = False
