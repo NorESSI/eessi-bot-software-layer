@@ -19,11 +19,12 @@ from connections import github
 from tools import config
 from tools.args import event_handler_parse
 from tools.controlcenter import control_center_process_comment, control_center_process_pr_opened
-from tasks.build import submit_build_jobs
+from tasks.build import check_build_permission, submit_build_jobs
 from tasks.deploy import deploy_built_artefacts
 
 from pyghee.lib import PyGHee, create_app, get_event_info, read_event_from_json
 from pyghee.utils import log
+import os
 
 
 class EESSIBotSoftwareLayer(PyGHee):
@@ -63,7 +64,9 @@ class EESSIBotSoftwareLayer(PyGHee):
 
         if label == "bot:build":
             # run function to build software stack
-            submit_build_jobs(pr, event_info)
+            if check_build_permission(pr, event_info):
+                submit_build_jobs(pr, event_info)
+
         elif label == "bot:deploy":
             # run function to deploy built artefacts
             deploy_built_artefacts(pr, event_info)
@@ -98,6 +101,25 @@ class EESSIBotSoftwareLayer(PyGHee):
         else:
             log("No handler for PR action '%s'" % action)
 
+    def start(self, app, port=3000):
+        """starts the app and log information in the log file
+
+        Args:
+            app (object): instance of class EESSIBotSoftwareLayer
+            port (int, optional): Defaults to 3000.
+        """
+        start_msg = "EESSI bot for software layer started!"
+        print(start_msg)
+        log(start_msg)
+        port_info = "app is listening on port %s" % port
+        print(port_info)
+        log(port_info)
+        my_logfile = os.path.join(os.getcwd(), "pyghee.log")
+        log_file_info = "logging in to %s" % my_logfile
+        print(log_file_info)
+        log(log_file_info)
+        waitress.serve(app, listen='*:%s' % port)
+
 
 def main():
     """Main function."""
@@ -115,8 +137,7 @@ def main():
     else:
         # Run as web app
         app = create_app(klass=EESSIBotSoftwareLayer)
-        log("EESSI bot for software layer started!")
-        waitress.serve(app, listen='*:%s' % opts.port)
+        app.start(app, port=opts.port)
 
 
 if __name__ == '__main__':
