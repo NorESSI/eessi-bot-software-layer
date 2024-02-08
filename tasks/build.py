@@ -11,64 +11,73 @@
 #
 # license: GPLv2
 #
+
+# Standard library imports
+from collections import namedtuple
 import configparser
+from datetime import datetime, timezone
 import json
 import os
 import shutil
 import sys
 
-from collections import namedtuple
-from connections import github
-from datetime import datetime, timezone
-from pyghee.utils import log, error
+# Third party imports (anything installed into the local Python environment)
+from pyghee.utils import error, log
 from retry.api import retry_call
-from tools import config, run_cmd, pr_comments
+
+# Local application imports (anything from EESSI/eessi-bot-software-layer)
+from connections import github
+from tools import config, pr_comments, run_cmd
 from tools.job_metadata import create_metadata_file
 
+
 APP_NAME = "app_name"
+ARCHITECTURE_TARGETS = "architecturetargets"
 AWAITS_RELEASE = "awaits_release"
 BUILDENV = "buildenv"
 BUILD_JOB_SCRIPT = "build_job_script"
+BUILD_LOGS_DIR = "build_logs_dir"
+BUILD_PERMISSION = "build_permission"
+CFG_DIRNAME = "cfg"
 CONTAINER_CACHEDIR = "container_cachedir"
-DEFAULT_JOB_TIME_LIMIT = "24:00:00"
 CVMFS_CUSTOMIZATIONS = "cvmfs_customizations"
+DEFAULT_JOB_TIME_LIMIT = "24:00:00"
 GITHUB = "github"
-HTTP_PROXY = "http_proxy"
 HTTPS_PROXY = "https_proxy"
+HTTP_PROXY = "http_proxy"
 INITIAL_COMMENT = "initial_comment"
 JOBS_BASE_DIR = "jobs_base_dir"
+JOB_ARCHITECTURE = "architecture"
+JOB_CFG_FILENAME = "job.cfg"
+JOB_CONTAINER = "container"
+JOB_LOCAL_TMP = "local_tmp"
+JOB_HTTPS_PROXY = "https_proxy"
+JOB_HTTP_PROXY = "http_proxy"
+JOB_LOAD_MODULES = "load_modules"
+JOB_OS_TYPE = "os_type"
+JOB_REPOSITORY = "repository"
+JOB_REPOS_CFG_DIR = "repos_cfg_dir"
+JOB_REPO_ID = "repo_id"
+JOB_REPO_NAME = "repo_name"
+JOB_REPO_VERSION = "repo_version"
+JOB_SITECONFIG = "site_config"
+JOB_SOFTWARE_SUBDIR = "software_subdir"
 LOAD_MODULES = "load_modules"
 LOCAL_TMP = "local_tmp"
-SLURM_PARAMS = "slurm_params"
-SUBMITTED_JOB_COMMENTS = "submitted_job_comments"
-SUBMIT_COMMAND = "submit_command"
-BUILD_PERMISSION = "build_permission"
 NO_BUILD_PERMISSION_COMMENT = "no_build_permission_comment"
-ARCHITECTURE_TARGETS = "architecturetargets"
-REPO_TARGETS = "repo_targets"
-REPO_TARGET_MAP = "repo_target_map"
 REPOS_CFG_DIR = "repos_cfg_dir"
-REPOS_ID = "repo_id"
 REPOS_REPO_NAME = "repo_name"
 REPOS_REPO_VERSION = "repo_version"
 REPOS_CONFIG_BUNDLE = "config_bundle"
 REPOS_CONFIG_MAP = "config_map"
 REPOS_CONTAINER = "container"
+REPO_TARGETS = "repo_targets"
+REPO_TARGET_MAP = "repo_target_map"
+SHARED_FS_PATH = "shared_fs_path"
+SLURM_PARAMS = "slurm_params"
+SUBMITTED_JOB_COMMENTS = "submitted_job_comments"
+SUBMIT_COMMAND = "submit_command"
 
-JOB_SITECONFIG = "site_config"
-JOB_LOCAL_TMP = "local_tmp"
-JOB_HTTP_PROXY = "http_proxy"
-JOB_HTTPS_PROXY = "https_proxy"
-JOB_LOAD_MODULES = "load_modules"
-JOB_REPOSITORY = "repository"
-JOB_CONTAINER = "container"
-JOB_REPO_ID = "repo_id"
-JOB_REPO_NAME = "repo_name"
-JOB_REPO_VERSION = "repo_version"
-JOB_REPOS_CFG_DIR = "repos_cfg_dir"
-JOB_ARCHITECTURE = "architecture"
-JOB_SOFTWARE_SUBDIR = "software_subdir"
-JOB_OS_TYPE = "os_type"
 
 Job = namedtuple('Job', ('working_dir', 'arch_target', 'repo_id', 'slurm_opts', 'year_month', 'pr_id'))
 
@@ -77,17 +86,19 @@ repo_cfg = {}
 
 
 def get_build_env_cfg(cfg):
-    """Gets build environment values
+    """
+    Gets build environment values from configuration and process some
+    (slurm_params and cvmfs_customizations)
 
     Args:
-        cfg (dict): dictionary holding full configuration (by default defined in app.cfg)
+        cfg (ConfigParser): ConfigParser instance holding full configuration
+            (typically read from 'app.cfg')
 
     Returns:
-         dict(str, dict): dictionary of configuration data
+         (dict): dictionary with configuration settings in the 'buildenv' section
     """
     fn = sys._getframe().f_code.co_name
 
-    # cfg = config.read_config()
     buildenv = cfg[BUILDENV]
 
     jobs_base_dir = buildenv.get(JOBS_BASE_DIR)
@@ -111,9 +122,17 @@ def get_build_env_cfg(cfg):
     log(f"{fn}(): slurm_params '{slurm_params}'")
     config_data[SLURM_PARAMS] = slurm_params
 
+    shared_fs_path = buildenv.get(SHARED_FS_PATH)
+    log(f"{fn}(): shared_fs_path: '{shared_fs_path}'")
+    config_data[SHARED_FS_PATH] = shared_fs_path
+
     container_cachedir = buildenv.get(CONTAINER_CACHEDIR)
     log(f"{fn}(): container_cachedir '{container_cachedir}'")
     config_data[CONTAINER_CACHEDIR] = container_cachedir
+
+    build_logs_dir = buildenv.get(BUILD_LOGS_DIR)
+    log(f"{fn}(): build_logs_dir '{build_logs_dir}'")
+    config_data[BUILD_LOGS_DIR] = build_logs_dir
 
     cvmfs_customizations = {}
     try:
@@ -146,18 +165,20 @@ def get_build_env_cfg(cfg):
 
 
 def get_architecture_targets(cfg):
-    """get architecture_targets and set arch_target_map
+    """
+    Obtain mappings of architecture targets to Slurm parameters
 
     Args:
-        cfg (dict): dictionary holding full configuration (by default defined in app.cfg)
+        cfg (ConfigParser): ConfigParser instance holding full configuration
+            (typically read from 'app.cfg')
 
     Returns:
-        dict(str, dict): dictionary of arch_target_map which contains entries of the format
-                         OS/SUBDIR : ADDITIONAL_SBATCH_PARAMETERS
+        (dict): dictionary mapping architecture targets (format
+            OS/SOFTWARE_SUBDIR) to architecture specific Slurm job submission
+            parameters
     """
     fn = sys._getframe().f_code.co_name
 
-    # cfg = config.read_config()
     architecture_targets = cfg[ARCHITECTURE_TARGETS]
 
     arch_target_map = json.loads(architecture_targets.get('arch_target_map'))
@@ -166,13 +187,20 @@ def get_architecture_targets(cfg):
 
 
 def get_repo_cfg(cfg):
-    """get repository config settings
+    """
+    Obtain mappings of architecture targets to repository identifiers and
+    associated repository configuration settings
 
     Args:
-        cfg (dict): dictionary holding full configuration (by default defined in app.cfg)
+        cfg (ConfigParser): ConfigParser instance holding full configuration
+            (typically read from 'app.cfg')
 
     Returns:
-        dict: dictionary with config entries
+        (dict): dictionary containing repository settings as follows
+           - {REPOS_CFG_DIR: path to repository config directory as defined in 'app.cfg'}
+           - {REPO_TARGET_MAP: json of REPO_TARGET_MAP value as defined in 'app.cfg'}
+           - for all sections [JOB_REPO_ID] defined in REPOS_CFG_DIR/repos.cfg add a
+             mapping {JOB_REPO_ID: dictionary containing settings of that section}
     """
     fn = sys._getframe().f_code.co_name
 
@@ -218,7 +246,6 @@ def get_repo_cfg(cfg):
         if repo_id in repo_cfg:
             error(f"{fn}(): repo id '{repo_id}' in '{repos_cfg_file}' clashes with bot config")
 
-        # repo_cfg[repo_id] = repos_cfg[repo_id]
         repo_cfg[repo_id] = {}
         for (key, val) in repos_cfg.items(repo_id):
             repo_cfg[repo_id][key] = val
@@ -246,25 +273,36 @@ def get_repo_cfg(cfg):
 
 
 def create_pr_dir(pr, cfg, event_info):
-    """Create directory for Pull Request
+    """
+    Create working directory for job to be submitted. Full path to the working
+    directory has the format
+
+    JOBS_BASE_DIR/<year>.<month>/pr_<pr number>/event_<event id>/run_<run number>
+
+    where JOBS_BASE_DIR is defined in the configuration (see 'app.cfg'), year
+    contains four digits, and month contains two digits
 
     Args:
-        pr (github.PullRequest.Pullrequest): object to interact with pull request
-        cfg (dict): dictionary holding full configuration (by default defined in app.cfg)
+        pr (github.PullRequest.PullRequest): instance representing the pull request
+        cfg (ConfigParser): ConfigParser instance holding full configuration
+            (typically read from 'app.cfg')
         event_info (dict): event received by event_handler
 
     Returns:
         tuple of 3 elements containing
-
-        - year_month (string): string with datestamp (<year>.<month>)
-        - pr_id (int): pr number
-        - run_dir (string): path to run_dir
+        - (string): year_month with format '<year>.<month>' (year with four
+              digits, month with two digits)
+        - (string): pr_id with format 'pr_<pr number>'
+        - (string): run_dir which is the complete path to the created directory
+              with format as described above
     """
-    # fn = sys._getframe().f_code.co_name
-
-    # create directory structure according to alternative described in
-    #   https://github.com/EESSI/eessi-bot-software-layer/issues/7
-    #   jobs_base_dir/YYYY.MM/pr<id>/event_<id>/run_<id>/target_<cpuarch>
+    # create directory structure (see discussion of options in
+    #   https://github.com/EESSI/eessi-bot-software-layer/issues/7)
+    #
+    #   JOBS_BASE_DIR/<year>.<month>/pr_<pr number>/event_<event id>/run_<run number>
+    #
+    #   where JOBS_BASE_DIR is defined in the configuration (see 'app.cfg'), year
+    #   contains four digits, and month contains two digits
 
     build_env_cfg = get_build_env_cfg(cfg)
     jobs_base_dir = build_env_cfg[JOBS_BASE_DIR]
@@ -273,9 +311,10 @@ def create_pr_dir(pr, cfg, event_info):
     pr_id = 'pr_%s' % pr.number
     event_id = 'event_%s' % event_info['id']
     event_dir = os.path.join(jobs_base_dir, year_month, pr_id, event_id)
-    # the makedirs cannot be deferred to a later os.makedirs because the
-    # condition in the while loop below takes the state of the directory
-    # contents into account
+    # NOTE the first call of os.makedirs cannot be deferred (i.e., to only
+    # after it has been determined that any job will be created due to the
+    # filters provided), because the condition in the 'while' loop below
+    # takes the contents of the directory event_dir into account
     os.makedirs(event_dir, exist_ok=True)
 
     run = 0
@@ -288,29 +327,24 @@ def create_pr_dir(pr, cfg, event_info):
 
 
 def download_pr(repo_name, branch_name, pr, arch_job_dir):
-    """Download pull request to arch_job_dir
+    """
+    Download pull request to job working directory
 
     Args:
-        repo_name (string): pr base repo name
-        branch_name (string): pr branch name
-        pr (github.PullRequest.Pullrequest): object to interact with pull request
-        arch_job_dir (string): location of arch_job_dir
-    """
-    # fn = sys._getframe().f_code.co_name
+        repo_name (string): name of the repository (format USER_OR_ORGANISATION/REPOSITORY)
+        branch_name (string): name of the base branch of the pull request
+        pr (github.PullRequest.PullRequest): instance representing the pull request
+        arch_job_dir (string): working directory of the job to be submitted
 
+    Returns:
+        None (implicitly)
+    """
     # download pull request to arch_job_dir
-    #  - PyGitHub doesn't seem capable of doing that (easily);
-    #  - for now, keep it simple and just execute the commands (anywhere) (note 'git clone' requires that
+    # - 'git clone' repository into arch_job_dir (NOTE 'git clone' requires that
     #    destination is an empty directory)
-    #    * patching method
-    #      git clone https://github.com/REPO_NAME arch_job_dir
-    #      git checkout BRANCH (is stored as ref for base record in PR)
-    #      curl -L https://github.com/REPO_NAME/pull/PR_NUMBER.patch > arch_job_dir/PR_NUMBER.patch
-    #    (execute the next one in arch_job_dir)
-    #      git am PR_NUMBER.patch
-    #
-    #  - REPO_NAME is repo_name
-    #  - PR_NUMBER is pr.number
+    # - 'git checkout' base branch of pull request
+    # - 'curl' diff for pull request
+    # - 'git apply' diff file
     git_clone_cmd = ' '.join(['git clone', f'https://github.com/{repo_name}', arch_job_dir])
     clone_output, clone_error, clone_exit_code = run_cmd(git_clone_cmd, "Clone repo", arch_job_dir)
 
@@ -329,16 +363,19 @@ def download_pr(repo_name, branch_name, pr, arch_job_dir):
 
 
 def apply_cvmfs_customizations(cvmfs_customizations, arch_job_dir):
-    """if cvmfs_customizations are defined then applies it
+    """
+    Apply cvmfs_customizations to job
 
     Args:
-        cvmfs_customizations (dictionary): maps a file name to an entry that needs to be appended to that file.
-        arch_job_dir ((string): location of arch_job_dir
-    """
-    # fn = sys._getframe().f_code.co_name
+        cvmfs_customizations (dict): defines both the CVMFS configuration files
+            and the contents to be appended to these files
+        arch_job_dir (string): path to working directory of the job
 
+    Returns:
+        None (implicitly)
+    """
     if len(cvmfs_customizations) > 0:
-        # for each entry/key, append value to file
+        # for each key, append value to file defined by key
         for key in cvmfs_customizations.keys():
             basename = os.path.basename(key)
             jobcfgfile = os.path.join(arch_job_dir, basename)
@@ -351,17 +388,19 @@ def apply_cvmfs_customizations(cvmfs_customizations, arch_job_dir):
 
 
 def prepare_jobs(pr, cfg, event_info, action_filter):
-    """prepare job directory with pull request and cfg/job.cfg as well as
-       additional config files
+    """
+    Prepare all jobs whose context matches the given filter. Preparation includes
+    creating a working directory for a job, downloading the pull request into
+    that directory and creating a job specific configuration file.
 
     Args:
-        pr (github.PullRequest.Pullrequest): object to interact with pull request
-        cfg (dict): dictionary holding full configuration (by default defined in app.cfg)
+        pr (github.PullRequest.PullRequest): instance representing the pull request
+        cfg (ConfigParser): instance holding full configuration (typically read from 'app.cfg')
         event_info (dict): event received by event_handler
-        action_filter (EESSIBotActionFilter instance): used to filter which jobs shall be prepared
+        action_filter (EESSIBotActionFilter): used to filter which jobs shall be prepared
 
     Returns:
-        jobs: list of the created jobs
+        (list): list of the prepared jobs
     """
     fn = sys._getframe().f_code.co_name
 
@@ -379,9 +418,9 @@ def prepare_jobs(pr, cfg, event_info, action_filter):
     # create run dir (base directory for potentially several jobs)
     # TODO may still be too early (before we get to any actual job being
     #      prepared below when calling 'download_pr')
-    # instead of using a run_dir, maybe just create a unique dir for each
-    # job to be submitted? thus we could easily postpone the create_pr_dir
-    # call to just before download_pr
+    #      instead of using a run_dir, maybe just create a unique dir for each
+    #      job to be submitted? thus we could easily postpone the create_pr_dir
+    #      call to just before download_pr
     year_month, pr_id, run_dir = create_pr_dir(pr, cfg, event_info)
 
     jobs = []
@@ -392,9 +431,9 @@ def prepare_jobs(pr, cfg, event_info, action_filter):
             log(f"{fn}(): skipping arch {arch} because repo target map does not define repositories to build for")
             continue
         for repo_id in repocfg[REPO_TARGET_MAP][arch]:
-            # ensure repocfg contains information about the repository repo_id if repo_id != EESSI-pilot
-            # Note, EESSI-pilot is a bad/misleading name, it should be more like AS_IN_CONTAINER
-            if repo_id != "EESSI-pilot" and repo_id not in repocfg:
+            # ensure repocfg contains information about the repository repo_id if repo_id != EESSI
+            # Note, EESSI is a bad/misleading name, it should be more like AS_IN_CONTAINER
+            if (repo_id != "EESSI" and repo_id != "EESSI-pilot") and repo_id not in repocfg:
                 log(f"{fn}(): skipping repo {repo_id}, it is not defined in repo config {repocfg[REPOS_CFG_DIR]}")
                 continue
 
@@ -417,7 +456,7 @@ def prepare_jobs(pr, cfg, event_info, action_filter):
             # TODO optimisation? download once, copy and cleanup initial copy?
             download_pr(base_repo_name, base_branch_name, pr, job_dir)
 
-            # prepare ./cfg/job.cfg
+            # prepare job configuration file 'job.cfg' in directory <job_dir>/cfg
             cpu_target = '/'.join(arch.split('/')[1:])
             os_type = arch.split('/')[0]
             log(f"{fn}(): arch = '{arch}' => cpu_target = '{cpu_target}' , os_type = '{os_type}'")
@@ -436,26 +475,31 @@ def prepare_jobs(pr, cfg, event_info, action_filter):
 
 def prepare_job_cfg(job_dir, build_env_cfg, repos_cfg, repo_id, software_subdir, os_type):
     """
-    Set up job configuration file 'cfg/job.cfg'
+    Set up job configuration file 'job.cfg' in directory <job_dir>/cfg
 
     Args:
-        job_dir (string): directory of job
-        build_env_cfg (dictionary): build environment configuration
-        repos_cfg (dictionary):  configuration settings for all repositories
-        repo_id (string):  identifier of the repository to build for
-        software_subdir (string): software subdirectory to build for (CPU arch)
-        os_type (string): type of the os (e.g., linux)
+        job_dir (string): working directory of the job
+        build_env_cfg (dict): build environment settings
+        repos_cfg (dict): configuration settings for all repositories
+        repo_id (string): identifier of the repository to build for
+        software_subdir (string): software subdirectory to build for (e.g., 'x86_64/generic')
+        os_type (string): type of the os (e.g., 'linux')
+
+    Returns:
+        None (implicitly)
     """
     fn = sys._getframe().f_code.co_name
 
-    jobcfg_dir = os.path.join(job_dir, 'cfg')
+    jobcfg_dir = os.path.join(job_dir, CFG_DIRNAME)
     # create ini file job.cfg with entries:
     # [site_config]
     # local_tmp = LOCAL_TMP_VALUE
+    # shared_fs_path = SHARED_FS_PATH
+    # build_logs_dir = BUILD_LOGS_DIR
     #
     # [repository]
     # repos_cfg_dir = JOB_CFG_DIR
-    # repo_id = REPO_ID
+    # repo_id = JOB_REPO_ID
     # container = CONTAINER
     # repo_name = REPO_NAME
     # repo_version = REPO_VERSION
@@ -465,27 +509,30 @@ def prepare_job_cfg(job_dir, build_env_cfg, repos_cfg, repo_id, software_subdir,
     # os_type = OS_TYPE
     job_cfg = configparser.ConfigParser()
     job_cfg[JOB_SITECONFIG] = {}
-    if build_env_cfg[CONTAINER_CACHEDIR]:
-        job_cfg[JOB_SITECONFIG][CONTAINER_CACHEDIR] = build_env_cfg[CONTAINER_CACHEDIR]
-    if build_env_cfg[LOCAL_TMP]:
-        job_cfg[JOB_SITECONFIG][JOB_LOCAL_TMP] = build_env_cfg[LOCAL_TMP]
-    if build_env_cfg[HTTP_PROXY]:
-        job_cfg[JOB_SITECONFIG][JOB_HTTP_PROXY] = build_env_cfg[HTTP_PROXY]
-    if build_env_cfg[HTTPS_PROXY]:
-        job_cfg[JOB_SITECONFIG][JOB_HTTPS_PROXY] = build_env_cfg[HTTPS_PROXY]
-    if build_env_cfg[LOAD_MODULES]:
-        job_cfg[JOB_SITECONFIG][JOB_LOAD_MODULES] = build_env_cfg[LOAD_MODULES]
+    build_env_to_job_cfg_keys = {
+        BUILD_LOGS_DIR: BUILD_LOGS_DIR,
+        CONTAINER_CACHEDIR: CONTAINER_CACHEDIR,
+        HTTP_PROXY: JOB_HTTP_PROXY,
+        HTTPS_PROXY: JOB_HTTPS_PROXY,
+        LOAD_MODULES: JOB_LOAD_MODULES,
+        LOCAL_TMP: JOB_LOCAL_TMP,
+        SHARED_FS_PATH: SHARED_FS_PATH,
+    }
+    for build_env_key, job_cfg_key in build_env_to_job_cfg_keys.items():
+        if build_env_cfg[build_env_key]:
+            job_cfg[JOB_SITECONFIG][job_cfg_key] = build_env_cfg[build_env_key]
 
     job_cfg[JOB_REPOSITORY] = {}
     # directory for repos.cfg
-    # note REPOS_CFG_DIR is a global cfg for all repositories, hence it is stored
-    # in repos_cfg (not in config for a specific repository, i.e., repo_cfg)
+    # NOTE REPOS_CFG_DIR is a global configuration setting for all repositories,
+    #      hence it is stored in repos_cfg whereas repo_cfg used further below
+    #      contains setting for a specific repository
     if REPOS_CFG_DIR in repos_cfg and repos_cfg[REPOS_CFG_DIR]:
         job_cfg[JOB_REPOSITORY][JOB_REPOS_CFG_DIR] = jobcfg_dir
     # repo id
     job_cfg[JOB_REPOSITORY][JOB_REPO_ID] = repo_id
 
-    # settings for specific repo
+    # settings for a specific repository
     if repo_id in repos_cfg:
         repo_cfg = repos_cfg[repo_id]
         if repo_cfg[REPOS_CONTAINER]:
@@ -499,19 +546,17 @@ def prepare_job_cfg(job_dir, build_env_cfg, repos_cfg, repo_id, software_subdir,
     job_cfg[JOB_ARCHITECTURE][JOB_SOFTWARE_SUBDIR] = software_subdir
     job_cfg[JOB_ARCHITECTURE][JOB_OS_TYPE] = os_type
 
-    # copy repository config bundle to directory cfg
-    # TODO verify that app.cfg defines 'repos_cfg_dir'
-    # copy repos_cfg[REPOS_CFG_DIR]/repos.cfg to jobcfg_dir
-    # copy repos_cfg[REPOS_CFG_DIR]/*.tgz to jobcfg_dir
+    # copy repos_cfg[REPOS_CFG_DIR]/repos.cfg to <jobcfg_dir>
+    # copy repos_cfg[REPOS_CFG_DIR]/*.tgz to <jobcfg_dir>
     if REPOS_CFG_DIR in repos_cfg and repos_cfg[REPOS_CFG_DIR] and os.path.isdir(repos_cfg[REPOS_CFG_DIR]):
         src = repos_cfg[REPOS_CFG_DIR]
         shutil.copytree(src, jobcfg_dir)
         log(f"{fn}(): copied {src} to {jobcfg_dir}")
 
-    # make sure that job cfg dir exists
+    # make sure that <jobcfg_dir> exists
     os.makedirs(jobcfg_dir, exist_ok=True)
 
-    jobcfg_file = os.path.join(jobcfg_dir, 'job.cfg')
+    jobcfg_file = os.path.join(jobcfg_dir, JOB_CFG_FILENAME)
     with open(jobcfg_file, "w") as jcf:
         job_cfg.write(jcf)
 
@@ -522,22 +567,25 @@ def prepare_job_cfg(job_dir, build_env_cfg, repos_cfg, repo_id, software_subdir,
 
 
 def submit_job(job, cfg):
-    """Parse job id and submit jobs from directory
+    """
+    Submit a job, obtain its id and create a symlink for easier management
 
     Args:
-        job (list): jobs to be submitted
-        cfg (dict): dictionary holding full configuration (by default defined in app.cfg)
+        job (Job): namedtuple containing all information about job to be submitted
+        cfg (ConfigParser): instance holding full configuration (typically read from 'app.cfg')
 
     Returns:
         tuple of 2 elements containing
-            - job_id(string):  job_id of submitted job
-            - symlink(string): symlink from main pr_<ID> dir to job dir (job[0])
+        - (string): id of the submitted job
+        - (string): path JOBS_BASE_DIR/job.year_month/job.pr_id/SLURM_JOBID which
+          is a symlink to the job's working directory (job[0] or job.working_dir)
     """
     fn = sys._getframe().f_code.co_name
 
     build_env_cfg = get_build_env_cfg(cfg)
 
-    # Add a default time limit of 24h to the command if nothing else is specified by the user
+    # add a default time limit of 24h to the job submit command if no other time
+    # limit is specified already
     all_opts_str = " ".join([build_env_cfg[SLURM_PARAMS], job.slurm_opts])
     all_opts_list = all_opts_str.split(" ")
     if any([(opt.startswith("--time") or opt.startswith("-t")) for opt in all_opts_list]):
@@ -558,7 +606,9 @@ def submit_job(job, cfg):
                                                                working_dir=job.working_dir)
 
     # sbatch output is 'Submitted batch job JOBID'
-    #   parse job id & add it to array of submitted jobs PLUS create a symlink from main pr_<ID> dir to job dir (job[0])
+    #   parse job id, add it to array of submitted jobs and create a symlink
+    #   from JOBS_BASE_DIR/job.year_month/job.pr_id/SLURM_JOBID to the job's
+    #   working directory
     log(f"{fn}(): sbatch out: {cmdline_output}")
     log(f"{fn}(): sbatch err: {cmdline_error}")
 
@@ -572,22 +622,27 @@ def submit_job(job, cfg):
 
 
 def create_pr_comment(job, job_id, app_name, pr, gh, symlink):
-    """create pr comment for newly submitted job
+    """
+    Create a comment to the pull request for a newly submitted job
 
     Args:
-        job (named tuple): key data about job that has been submitted
-        job_id (string): id of submitted job
+        job (Job): namedtuple containing information about submitted job
+        job_id (string): id of the submitted job
         app_name (string): name of the app
-        pr (github.PullRequest.Pullrequest): object to interact with pull request
+        pr (github.PullRequest.PullRequest): instance representing the pull request
         gh (object): github instance
         symlink (string): symlink from main pr_<ID> dir to job dir
+
+    Returns:
+        github.IssueComment.IssueComment instance or None (note, github refers to
+            PyGithub, not the github from the internal connections module)
     """
     fn = sys._getframe().f_code.co_name
 
     # obtain arch from job.arch_target which has the format OS/ARCH
     arch_name = '-'.join(job.arch_target.split('/')[1:])
 
-    # get current data/time
+    # get current date and time
     dt = datetime.now(timezone.utc)
 
     # construct initial job comment
@@ -618,24 +673,30 @@ def create_pr_comment(job, job_id, app_name, pr, gh, symlink):
 
 
 def submit_build_jobs(pr, event_info, action_filter):
-    """Build from the pr by fetching data for build environment cofinguration, downloading pr,
-       running jobs and adding comments
+    """
+    Create build jobs for a pull request by preparing jobs which match the given
+    filters, submitting them, adding comments to the pull request on GitHub and
+    creating a metadata file in the job's working directory
 
     Args:
-        pr (github.PullRequest.Pullrequest instance): object to interact with pull request
-        event_info (string): event received by event_handler
-        action_filter (EESSIBotActionFilter instance): used to filter which jobs shall be prepared
+        pr (github.PullRequest.PullRequest): instance representing the pull request
+        event_info (dict): event received by event_handler
+        action_filter (EESSIBotActionFilter): used to filter which jobs shall be prepared
+
+    Returns:
+        (dict): dictionary mapping a job id to a github.IssueComment.IssueComment
+            instance (corresponding to the pull request comment for the submitted
+            job) or an empty dictionary if there were no jobs to be submitted
     """
     fn = sys._getframe().f_code.co_name
 
-    # retrieve some settings from 'app.cfg' in bot directory
     cfg = config.read_config()
     app_name = cfg[GITHUB].get(APP_NAME)
 
-    # setup job directories (one per elem in product of architecture % repositories)
+    # setup job directories (one per element in product of architecture x repositories)
     jobs = prepare_jobs(pr, cfg, event_info, action_filter)
 
-    # return if no jobs to be submitted
+    # return if there are no jobs to be submitted
     if not jobs:
         log(f"{fn}(): no jobs ({len(jobs)}) to be submitted")
         return {}
@@ -643,32 +704,37 @@ def submit_build_jobs(pr, event_info, action_filter):
     # obtain handle to GitHub
     gh = github.get_instance()
 
-    # process prepared jobs: submit, create metadata file and add comment to PR
+    # process prepared jobs: submit, create metadata file and add comment to pull
+    # request on GitHub
     job_id_to_comment_map = {}
     for job in jobs:
         # submit job
         job_id, symlink = submit_job(job, cfg)
 
-        # report submitted job
-        issue_comment = create_pr_comment(job, job_id, app_name, pr, gh, symlink)
-        job_id_to_comment_map[job_id] = issue_comment
+        # create pull request comment to report about the submitted job
+        pr_comment = create_pr_comment(job, job_id, app_name, pr, gh, symlink)
+        job_id_to_comment_map[job_id] = pr_comment
 
-        pr_comment = pr_comments.PRComment(pr.base.repo.full_name, pr.number, issue_comment.id)
+        pr_comment = pr_comments.PRComment(pr.base.repo.full_name, pr.number, pr_comment.id)
 
-        # create _bot_job<jobid>.metadata file in submission directory
+        # create _bot_job<jobid>.metadata file in the job's working directory
         create_metadata_file(job, job_id, pr_comment)
 
-    # return f"created jobs: {', '.join(job_ids)}"
     return job_id_to_comment_map
 
 
 def check_build_permission(pr, event_info):
-    """check if the GH account is authorized to trigger build
+    """
+    Check if GitHub account whom's action resulted in an event is authorized to
+    trigger a build job
 
     Args:
-        pr (github.PullRequest.Pullrequest): object to interact with pull request
-        event_info (string): event received by event_handler
+        pr (github.PullRequest.PullRequest): instance representing the pull request
+        event_info (dict): event received by event_handler
 
+    Returns:
+        (bool): True -> GitHub account is authorized, False -> GitHub account is
+            not authorized
     """
     fn = sys._getframe().f_code.co_name
 
@@ -678,8 +744,6 @@ def check_build_permission(pr, event_info):
 
     buildenv = cfg[BUILDENV]
 
-    # verify that the GH account that set label bot:build has the
-    # permission to trigger the build
     build_permission = buildenv.get(BUILD_PERMISSION, '')
 
     log(f"{fn}(): build permission '{build_permission}'")
@@ -696,3 +760,78 @@ def check_build_permission(pr, event_info):
     else:
         log(f"{fn}(): GH account '{build_labeler}' is authorized to build")
         return True
+
+
+def request_bot_build_issue_comments(repo_name, pr_number):
+    """
+    Query the github API for the issue_comments in a pr.
+
+    Archs:
+        repo_name (string): name of the repository (format USER_OR_ORGANISATION/REPOSITORY)
+        pr_number (int): number og the pr
+
+    Returns:
+        status_table (dict): dictionary with 'arch', 'date', 'status', 'url' and 'result'
+            for all the finished builds;
+    """
+    status_table = {'arch': [], 'date': [], 'status': [], 'url': [], 'result': []}
+    cfg = config.read_config()
+
+    # for loop because github has max 100 items per request.
+    # if the pr has more than 100 comments we need to use per_page
+    # argument at the moment the for loop is for a max of 400 comments could bump this up
+    for x in range(1, 5):
+        curl_cmd = f'curl -L https://api.github.com/repos/{repo_name}/issues/{pr_number}/comments?per_page=100&page={x}'
+        curl_output, curl_error, curl_exit_code = run_cmd(curl_cmd, "fetch all comments")
+
+        comments = json.loads(curl_output)
+
+        for comment in comments:
+            # iterate through the comments to find the one where the status of the build was in
+            if config.read_config()["submitted_job_comments"]['initial_comment'][:20] in comment['body']:
+
+                # get archictecture from comment['body']
+                first_line = comment['body'].split('\n')[0]
+                arch_map = get_architecture_targets(cfg)
+                for arch in arch_map.keys():
+                    target_arch = '/'.join(arch.split('/')[1:])
+                    if target_arch in first_line:
+                        status_table['arch'].append(target_arch)
+
+                # get date, status, url and result from the markdown table
+                comment_table = comment['body'][comment['body'].find('|'):comment['body'].rfind('|')+1]
+
+                # Convert markdown table to a dictionary
+                lines = comment_table.split('\n')
+                rows = []
+                keys = []
+                for i, row in enumerate(lines):
+                    values = {}
+                    if i == 0:
+                        for key in row.split('|'):
+                            keys.append(key.strip())
+                    elif i == 1:
+                        continue
+                    else:
+                        for j, value in enumerate(row.split('|')):
+                            if j > 0 and j < len(keys) - 1:
+                                values[keys[j]] = value.strip()
+                        rows.append(values)
+
+                # add date, status, url to  status_table if
+                for row in rows:
+                    if row['job status'] == 'finished':
+                        status_table['date'].append(row['date'])
+                        status_table['status'].append(row['job status'])
+                        status_table['url'].append(comment['html_url'])
+                        if 'FAILURE' in row['comment']:
+                            status_table['result'].append(':cry: FAILURE')
+                        elif 'SUCCESS' in value['comment']:
+                            status_table['result'].append(':grin: SUCCESS')
+                        elif 'UNKNOWN' in row['comment']:
+                            status_table['result'].append(':shrug: UNKNOWN')
+                        else:
+                            status_table['result'].append(row['comment'])
+        if len(comments) != 100:
+            break
+    return status_table
