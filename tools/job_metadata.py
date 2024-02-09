@@ -39,7 +39,7 @@ def create_metadata_file(job, job_id, pr_comment):
     pr_number = pr_comment.pr_number
     pr_comment_id = pr_comment.pr_comment_id
 
-    # create _bot_job<jobid>.metadata file in the jobs's working directory
+    # create _bot_job<jobid>.metadata file in the job's working directory
     bot_jobfile = configparser.ConfigParser()
     bot_jobfile['PR'] = {'repo': repo_name,
                          'pr_number': pr_number,
