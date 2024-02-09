@@ -234,7 +234,7 @@ def append_tarball_to_upload_log(tarball, job_dir):
 
 def upload_tarball(job_dir, build_target, timestamp, repo_name, pr_number):
     """
-    Upload built artefact to an S3 bucket.
+    Upload built tarball to an S3 bucket.
 
     Args:
         job_dir (string): path to the job directory
@@ -497,7 +497,7 @@ def deploy_built_artefacts(pr, event_info):
 
     # 1) determine the jobs that have been run for the PR
     # 2) for each job, check its status (SUCCESS or FAILURE)
-    # 3) for the successful ones, determine which to deploy depending on polic
+    # 3) for the successful ones, determine which to deploy depending on policy
     # 4) call function to deploy a single artefact per software subdir
 
     # 1) determine the jobs that have been run for the PR
@@ -505,7 +505,7 @@ def deploy_built_artefacts(pr, event_info):
     log(f"{funcname}(): job_dirs = {','.join(job_dirs)}")
 
     # 2) for each job, check its status (SUCCESS or FAILURE)
-    successful_jobs = determine_successful_jobs(job_dirs)
+    successes = determine_successful_jobs(job_dirs)
 
     # 3) for the successful ones, determine which to deploy depending on
     #    the upload policy
