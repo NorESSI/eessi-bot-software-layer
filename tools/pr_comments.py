@@ -25,6 +25,7 @@ from retry.api import retry_call
 # Local application imports (anything from EESSI/eessi-bot-software-layer)
 from connections import github
 
+
 PRComment = namedtuple('PRComment', ('repo_name', 'pr_number', 'pr_comment_id'))
 
 
